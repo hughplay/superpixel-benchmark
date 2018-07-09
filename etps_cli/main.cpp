@@ -2,21 +2,21 @@
  * Copyright (c) 2016, David Stutz
  * Contact: david.stutz@rwth-aachen.de, davidstutz.de
  * All rights reserved.
- * 
+ *
  * Redistribution and use in source and binary forms, with or without modification,
  * are permitted provided that the following conditions are met:
- * 
+ *
  * 1. Redistributions of source code must retain the above copyright notice,
  *    this list of conditions and the following disclaimer.
- * 
+ *
  * 2. Redistributions in binary form must reproduce the above copyright notice,
  *    this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 
+ *
  * 3. Neither the name of the copyright holder nor the names of its contributors
  *    may be used to endorse or promote products derived from this software
  *    without specific prior written permission.
- * 
+ *
  * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
  * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
  * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
@@ -61,7 +61,7 @@
  * \author David Stutz
  */
 int main(int argc, const char** argv) {
-    
+
     boost::program_options::options_description desc("Allowed options");
     desc.add_options()
         ("help,h", "produce help message")
@@ -72,13 +72,15 @@ int main(int argc, const char** argv) {
         ("size-weight,n", boost::program_options::value<double>()->default_value(1.0), "size weight")
         ("iterations,t", boost::program_options::value<int>()->default_value(1), "number of iterations")
         ("csv,o", boost::program_options::value<std::string>()->default_value(""), "save segmentation as CSV file")
+        ("label,b", boost::program_options::value<std::string>()->default_value(""), "save segmentation as random label")
         ("vis,v", boost::program_options::value<std::string>()->default_value(""), "visualize contours")
+        ("pure,p", "pure contours")
         ("prefix,x", boost::program_options::value<std::string>()->default_value(""), "output file prefix")
         ("wordy,w", "verbose/wordy/debug");
 
     boost::program_options::positional_options_description positionals;
     positionals.add("input", 1);
-    
+
     boost::program_options::variables_map parameters;
     boost::program_options::store(boost::program_options::command_line_parser(argc, argv).options(desc).positional(positionals).run(), parameters);
     boost::program_options::notify(parameters);
@@ -87,96 +89,128 @@ int main(int argc, const char** argv) {
         std::cout << desc << std::endl;
         return 1;
     }
-    
+
     boost::filesystem::path output_dir(parameters["csv"].as<std::string>());
     if (!output_dir.empty()) {
         if (!boost::filesystem::is_directory(output_dir)) {
             boost::filesystem::create_directories(output_dir);
         }
     }
-    
+
+    boost::filesystem::path label_dir(parameters["label"].as<std::string>());
+    if (!label_dir.empty()) {
+        if (!boost::filesystem::is_directory(label_dir)) {
+            boost::filesystem::create_directories(label_dir);
+        }
+    }
+
     boost::filesystem::path vis_dir(parameters["vis"].as<std::string>());
     if (!vis_dir.empty()) {
         if (!boost::filesystem::is_directory(vis_dir)) {
             boost::filesystem::create_directories(vis_dir);
         }
     }
-    
-    boost::filesystem::path input_dir(parameters["input"].as<std::string>());
-    if (!boost::filesystem::is_directory(input_dir)) {
-        std::cout << "Image directory not found ..." << std::endl;
-        return 1;
-    }
-    
+
     std::string prefix = parameters["prefix"].as<std::string>();
-    
+
     bool wordy = false;
     if (parameters.find("wordy") != parameters.end()) {
         wordy = true;
     }
-    
+
+    bool pure = false;
+    if (parameters.find("pure") != parameters.end()) {
+        pure = true;
+    }
+
     int superpixels = parameters["superpixels"].as<int>();
     double regularization_weight = parameters["regularization-weight"].as<double>();
     double length_weight = parameters["length-weight"].as<double>();
     double size_weight = parameters["size-weight"].as<double>();
     int iterations = parameters["iterations"].as<int>();
-    
+
     std::multimap<std::string, boost::filesystem::path> images;
     std::vector<std::string> extensions;
     IOUtil::getImageExtensions(extensions);
-    IOUtil::readDirectory(input_dir, extensions, images);
-    
+
+    boost::filesystem::path input_dir(parameters["input"].as<std::string>());
+    if (boost::filesystem::is_directory(input_dir)) {
+        IOUtil::readDirectory(input_dir, extensions, images);
+    }
+    else if (boost::filesystem::is_regular_file(input_dir) && std::find(extensions.begin(), extensions.end(), input_dir.extension()) != extensions.end())
+        images.insert(std::pair<std::string, boost::filesystem::path>(input_dir.string(), input_dir));
+    else {
+        std::cout << "Image directory not found or file not exits ..." << std::endl;
+        return 1;
+    }
+
+
     float total = 0;
-    for (std::multimap<std::string, boost::filesystem::path>::iterator it = images.begin(); 
+    for (std::multimap<std::string, boost::filesystem::path>::iterator it = images.begin();
             it != images.end(); ++it) {
-        
+
         cv::Mat image = cv::imread(it->first);
-        
+
         // Same conversion for all algorithms.
-        int region_size = SuperpixelTools::computeRegionSizeFromSuperpixels(image, 
+        int region_size = SuperpixelTools::computeRegionSizeFromSuperpixels(image,
                 superpixels);
-        
+
         boost::timer timer;
         cv::Mat labels;
-        ETPS_OpenCV::computeSuperpixels(image, region_size, regularization_weight, 
+        ETPS_OpenCV::computeSuperpixels(image, region_size, regularization_weight,
                 length_weight, size_weight, iterations, labels);
         float elapsed = timer.elapsed();
         total += elapsed;
-        
+
         int unconnected_components = SuperpixelTools::relabelConnectedSuperpixels(labels);
-        
+
         if (wordy) {
-            std::cout << SuperpixelTools::countSuperpixels(labels) << " superpixels for " << it->first 
-                    << " (" << unconnected_components << " not connected; " 
+            std::cout << SuperpixelTools::countSuperpixels(labels) << " superpixels for " << it->first
+                    << " (" << unconnected_components << " not connected; "
                     << elapsed <<")." << std::endl;
         }
-        
+
         if (!output_dir.empty()) {
-            boost::filesystem::path csv_file(output_dir 
+            boost::filesystem::path csv_file(output_dir
                     / boost::filesystem::path(prefix + it->second.stem().string() + ".csv"));
             IOUtil::writeMatCSV<int>(csv_file, labels);
         }
-        
+
+        if (!label_dir.empty()) {
+            boost::filesystem::path label_file(label_dir
+                    // / boost::filesystem::path(prefix + it->second.stem().string() + ".png"));
+                    / boost::filesystem::path(prefix + it->second.filename().string() + "_labels.png"));
+            cv::Mat image_labels;
+            Visualization::drawRandom(labels, image_labels);
+            cv::imwrite(label_file.string(), image_labels);
+        }
+
         if (!vis_dir.empty()) {
-            boost::filesystem::path contours_file(vis_dir 
-                    / boost::filesystem::path(prefix + it->second.stem().string() + ".png"));
+            boost::filesystem::path contours_file(vis_dir
+                    // / boost::filesystem::path(prefix + it->second.stem().string() + ".png"));
+                    / boost::filesystem::path(prefix + it->second.filename().string() + "_contours.png"));
             cv::Mat image_contours;
-            Visualization::drawContours(image, labels, image_contours);
+            if (pure) {
+                Visualization::drawPureContours(image, labels, image_contours);
+            }
+            else {
+                Visualization::drawContours(image, labels, image_contours);
+            }
             cv::imwrite(contours_file.string(), image_contours);
         }
     }
-    
+
     if (wordy) {
         std::cout << "Average time: " << total / images.size() << "." << std::endl;
     }
-    
+
     if (!output_dir.empty()) {
-        std::ofstream runtime_file(output_dir.string() + "/" + prefix + "runtime.txt", 
+        std::ofstream runtime_file(output_dir.string() + "/" + prefix + "runtime.txt",
                 std::ofstream::out | std::ofstream::app);
-        
+
         runtime_file << total / images.size() << "\n";
         runtime_file.close();
     }
-    
+
     return 0;
 }
